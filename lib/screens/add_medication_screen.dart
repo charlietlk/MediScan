@@ -3,6 +3,14 @@ import 'package:flutter/material.dart';
 import '../models/app_screen.dart';
 import '../models/medication.dart';
 import '../widgets/gradient_background.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
+import 'package:google_mlkit_barcode_scanning/google_mlkit_barcode_scanning.dart';
+
+enum YemekZamani { once, sirasinda, sonra }
+enum YasGrubu { cocuk, yetiskin, yasli }
+enum DoseStatus { pending, taken, skipped }
+
 
 class AddMedicationScreen extends StatefulWidget {
   const AddMedicationScreen({
@@ -29,7 +37,144 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
 
   String _selectedFrequency = 'once-daily';
   List<TimeOfDay> _times = [TimeOfDay.now()];
+  List<DoseStatus> _statuses = [DoseStatus.pending];
+  
+  YemekZamani _yemekZamani = YemekZamani.sirasinda;
+  YasGrubu _yasGrubu = YasGrubu.yetiskin;
+
   bool _reminderEnabled = true;
+
+  // --- AI saat öner (offline, serversiz) ---
+Future<void> _applyOfflineAiSuggestion() async {
+  final doz = _dozFromFrequency(_selectedFrequency);
+  final suggested = _suggestByRules(
+    doz: doz,
+    yemek: _yemekZamani,
+    yas: _yasGrubu,
+  );
+
+  final textList = suggested.map(_fmtHHmm).join(', ');
+
+  final action = await showModalBottomSheet<String>(
+    context: context,
+    builder: (ctx) => SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Wrap(
+          runSpacing: 12,
+          children: [
+            const Text('AI (offline) önerileri',
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
+            Text('Önerilen saatler: $textList'),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton(
+                    onPressed: () => Navigator.pop(ctx, 'merge'),
+                    child: const Text('Birleştir'),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: FilledButton(
+                    onPressed: () => Navigator.pop(ctx, 'replace'),
+                    child: const Text('Değiştir'),
+                  ),
+                ),
+              ],
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, 'cancel'),
+              child: const Text('Vazgeç'),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
+
+  if (!mounted || action == null || action == 'cancel') return;
+
+  final suggestedTOD = suggested.map(_toTimeOfDay).toList();
+
+  if (action == 'replace') {
+    setState(() {
+      _times = suggestedTOD;
+    });
+  } else if (action == 'merge') {
+    final merged = [..._times, ...suggestedTOD]
+      ..sort((a, b) => (a.hour * 60 + a.minute).compareTo(b.hour * 60 + b.minute));
+    setState(() {
+      _times = merged;
+    });
+  }
+}
+
+// --- Basit kural tabanlı önerici (serversiz) ---
+List<String> _suggestByRules({
+  required int doz,
+  required YemekZamani yemek,
+  required YasGrubu yas,
+}) {
+  int kahvalti, ogle, aksam;
+  switch (yas) {
+    case YasGrubu.cocuk:
+      kahvalti = 7 * 60 + 30; ogle = 12 * 60 + 30; aksam = 19 * 60;
+      break;
+    case YasGrubu.yetiskin:
+      kahvalti = 8 * 60; ogle = 13 * 60; aksam = 19 * 60 + 30;
+      break;
+    case YasGrubu.yasli:
+      kahvalti = 7 * 60 + 30; ogle = 12 * 60; aksam = 18 * 60 + 30;
+      break;
+  }
+
+  List<int> anchors;
+  switch (doz) {
+    case 1:  anchors = [kahvalti]; break;
+    case 2:  anchors = [kahvalti, ogle]; break;
+    case 3:  anchors = [kahvalti, ogle, aksam]; break;
+    case 4:  anchors = [kahvalti, (kahvalti + ogle) ~/ 2, ogle, aksam]; break;
+    default: anchors = [kahvalti];
+  }
+
+  int offset;
+  switch (yemek) {
+    case YemekZamani.once:      offset = -30; break;
+    case YemekZamani.sirasinda: offset = 0;   break;
+    case YemekZamani.sonra:     offset = 30;  break;
+  }
+
+  final out = <String>[];
+  for (final t in anchors) {
+    final t2 = t + offset;
+    final hh = (t2 ~/ 60).clamp(0, 23);
+    final mm = (t2 % 60).clamp(0, 59);
+    out.add('${hh.toString().padLeft(2, '0')}:${mm.toString().padLeft(2, '0')}');
+  }
+  return out;
+}
+
+int _dozFromFrequency(String freq) {
+  switch (freq) {
+    case 'once-daily':  return 1;
+    case 'twice-daily': return 2;
+    case 'three-times': return 3;
+    case 'four-times':  return 4;
+    default:            return 1;
+  }
+}
+
+TimeOfDay _toTimeOfDay(String hhmm) {
+  final parts = hhmm.split(':');
+  final h = int.parse(parts[0]);
+  final m = int.parse(parts[1]);
+  return TimeOfDay(hour: h, minute: m);
+}
+
+String _fmtHHmm(String hhmm) => hhmm;
+
 
   @override
   void dispose() {
@@ -69,14 +214,23 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
   }
 
   void _addTimeField() {
-    setState(() => _times = [..._times, TimeOfDay.now()]);
-  }
+  setState(() {
+    _times = [..._times, TimeOfDay.now()];
+    _statuses = [..._statuses, DoseStatus.pending]; 
+  });
+}
+
 
   void _removeTime(int index) {
-    if (_times.length == 1) return;
-    setState(() => _times.removeAt(index));
-  }
-
+  if (_times.length == 1) return;
+  setState(() {
+    _times.removeAt(index);
+    if (_statuses.length > index) {
+      _statuses.removeAt(index);
+    }
+  });
+}
+  
   DateTime? _parseDate(String text) {
     if (text.isEmpty) return null;
     final parts = text.split('/');
@@ -174,11 +328,7 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    _QuickOptionsRow(onOptionTapped: (label) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(content: Text('$label özelliği yakında eklenecek.')),
-                      );
-                    }),
+                    const QuickOptionsRow(),
                     const SizedBox(height: 24),
                     const _SectionTitle('Temel bilgiler'),
                     const SizedBox(height: 16),
@@ -227,13 +377,24 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
                       }).toList(),
                     ),
                     Align(
-                      alignment: Alignment.centerLeft,
-                      child: TextButton.icon(
-                        onPressed: _addTimeField,
-                        icon: const Icon(Icons.add_circle_outline),
-                        label: const Text('Yeni saat ekle'),
-                      ),
-                    ),
+  alignment: Alignment.centerLeft,
+  child: Row(
+    children: [
+      TextButton.icon(
+        onPressed: _addTimeField,
+        icon: const Icon(Icons.add_circle_outline),
+        label: const Text('Yeni saat ekle'),
+      ),
+      const SizedBox(width: 12),
+      TextButton.icon(
+        onPressed: _applyOfflineAiSuggestion, // <-- AI saat öneri butonu
+        icon: const Icon(Icons.auto_awesome),
+        label: const Text('AI ile saat öner'),
+      ),
+    ],
+  ),
+),
+
                     const SizedBox(height: 24),
                     const _SectionTitle('Takvim'),
                     const SizedBox(height: 16),
@@ -501,33 +662,90 @@ class _TimeTile extends StatelessWidget {
   }
 }
 
-class _QuickOptionsRow extends StatelessWidget {
-  const _QuickOptionsRow({
-    required this.onOptionTapped,
-  });
+class QuickOptionsRow extends StatefulWidget {
+  const QuickOptionsRow({super.key});
 
-  final ValueChanged<String> onOptionTapped;
+  @override
+  State<QuickOptionsRow> createState() => _QuickOptionsRowState();
+}
+
+class _QuickOptionsRowState extends State<QuickOptionsRow> {
+  final ImagePicker _picker = ImagePicker();
+  bool _busy = false;
+
+  void _show(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(msg), behavior: SnackBarBehavior.floating),
+    );
+  }
+
+  Future<void> _withBusy(Future<void> Function() job) async {
+    if (_busy) return;
+    setState(() => _busy = true);
+    try {
+      await job();
+    } catch (e) {
+      _show('Hata: $e');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  // Kamera -> OCR
+  Future<void> _onCamera() async => _withBusy(() async {
+        final x = await _picker.pickImage(source: ImageSource.camera, maxWidth: 1600);
+        if (x == null) return;
+        final input = InputImage.fromFilePath(x.path);
+        final recognizer = TextRecognizer(script: TextRecognitionScript.latin);
+        try {
+          final out = await recognizer.processImage(input);
+          final text = out.text.trim();
+          _show(text.isEmpty ? 'Metin bulunamadı.' : text);
+        } finally {
+          await recognizer.close();
+        }
+      });
+
+  // Galeri -> OCR
+  Future<void> _onGallery() async => _withBusy(() async {
+        final x = await _picker.pickImage(source: ImageSource.gallery, maxWidth: 1600);
+        if (x == null) return;
+        final input = InputImage.fromFilePath(x.path);
+        final recognizer = TextRecognizer(script: TextRecognitionScript.latin);
+        try {
+          final out = await recognizer.processImage(input);
+          final text = out.text.trim();
+          _show(text.isEmpty ? 'Metin bulunamadı.' : text);
+        } finally {
+          await recognizer.close();
+        }
+      });
+
+  // Kamera -> Barkod
+  Future<void> _onQr() async => _withBusy(() async {
+        final x = await _picker.pickImage(source: ImageSource.camera, maxWidth: 1600);
+        if (x == null) return;
+        final input = InputImage.fromFilePath(x.path);
+
+        // Format listesi vermiyoruz — sürüm uyuşmazlığı riskini azaltır
+        final scanner = BarcodeScanner();
+        try {
+          final codes = await scanner.processImage(input);
+          if (codes.isEmpty) {
+            _show('Kod bulunamadı.');
+            return;
+          }
+          final first = codes.first;
+          final value = first.rawValue ?? first.displayValue ?? '';
+          _show(value.isEmpty ? 'Kod çözümlenemedi.' : value);
+        } finally {
+          await scanner.close();
+        }
+      });
 
   @override
   Widget build(BuildContext context) {
-    final options = [
-      const _QuickOption(
-        icon: Icons.photo_camera_outlined,
-        label: 'Fotoğraf çek',
-        color: const Color(0xFF2563EB),
-      ),
-      const _QuickOption(
-        icon: Icons.qr_code_scanner_outlined,
-        label: 'Barkodu tara',
-        color: const Color(0xFF16A34A),
-      ),
-      const _QuickOption(
-        icon: Icons.upload_file_outlined,
-        label: 'Görsel yükle',
-        color: const Color(0xFF7C3AED),
-      ),
-    ];
-
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(20),
@@ -536,47 +754,64 @@ class _QuickOptionsRow extends StatelessWidget {
           children: [
             const Text(
               'Hızlı ekleme seçenekleri',
-              style: TextStyle(
-                fontWeight: FontWeight.w600,
-                color: const Color(0xFF1F2937),
-              ),
+              style: TextStyle(fontWeight: FontWeight.w600, color: Color(0xFF1F2937)),
             ),
             const SizedBox(height: 16),
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: options.map((option) {
-                return Expanded(
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 4),
-                    child: OutlinedButton(
-                      onPressed: () => onOptionTapped(option.label),
-                      style: OutlinedButton.styleFrom(
-                        padding: const EdgeInsets.symmetric(vertical: 20),
-                        side: BorderSide(color: option.color.withValues(alpha: 0.3)),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(16),
-                        ),
-                      ),
-                      child: Column(
-                        children: [
-                          Icon(option.icon, color: option.color),
-                          const SizedBox(height: 8),
-                          Text(
-                            option.label,
-                            style: TextStyle(
-                              fontSize: 12,
-                              fontWeight: FontWeight.w600,
-                              color: option.color,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                );
-              }).toList(),
-            )
+              children: [
+                _buildButton(
+                  icon: Icons.photo_camera_outlined,
+                  label: 'Fotoğraf çek',
+                  color: const Color(0xFF2563EB),
+                  onTap: _busy ? null : _onCamera,
+                ),
+                _buildButton(
+                  icon: Icons.qr_code_scanner_outlined,
+                  label: 'Barkodu tara',
+                  color: const Color(0xFF16A34A),
+                  onTap: _busy ? null : _onQr,
+                ),
+                _buildButton(
+                  icon: Icons.upload_file_outlined,
+                  label: 'Görsel yükle',
+                  color: const Color(0xFF7C3AED),
+                  onTap: _busy ? null : _onGallery,
+                ),
+              ],
+            ),
           ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildButton({
+    required IconData icon,
+    required String label,
+    required Color color,
+    required VoidCallback? onTap,
+  }) {
+    return Expanded(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 4),
+        child: OutlinedButton(
+          onPressed: onTap,
+          style: OutlinedButton.styleFrom(
+            padding: const EdgeInsets.symmetric(vertical: 20),
+            side: BorderSide(color: color.withOpacity(0.3)),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          ),
+          child: Column(
+            children: [
+              Icon(icon, color: color),
+              const SizedBox(height: 8),
+              Text(
+                label,
+                style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: color),
+              ),
+            ],
+          ),
         ),
       ),
     );
