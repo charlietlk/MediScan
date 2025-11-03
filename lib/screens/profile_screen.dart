@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 
 import '../models/app_screen.dart';
 import '../widgets/gradient_background.dart';
+import 'dart:io';
+import 'package:image_picker/image_picker.dart';
 
 class ProfileScreen extends StatefulWidget {
   const ProfileScreen({
@@ -27,11 +29,47 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
   String _selectedLanguage = 'tr';
 
+  // -- PROFİL FOTOĞRAFI STATE ve METOTLARI --
+final ImagePicker _picker = ImagePicker();
+XFile? _profileImage;   // seçilen fotoğraf
+bool _pfBusy = false;   // aynı anda iki tıklamayı engelle
+
+Future<void> _pickProfileFromCamera() async {
+  if (_pfBusy) return;
+  setState(() => _pfBusy = true);
+  try {
+    final x = await _picker.pickImage(source: ImageSource.camera, maxWidth: 1600);
+    if (x != null) setState(() => _profileImage = x);
+  } finally {
+    if (mounted) setState(() => _pfBusy = false);
+  }
+}
+
+Future<void> _pickProfileFromGallery() async {
+  if (_pfBusy) return;
+  setState(() => _pfBusy = true);
+  try {
+    final x = await _picker.pickImage(source: ImageSource.gallery, maxWidth: 1600);
+    if (x != null) setState(() => _profileImage = x);
+  } finally {
+    if (mounted) setState(() => _pfBusy = false);
+  }
+}
+
+void _showSnack(String msg) {
+  if (!mounted) return;
+  ScaffoldMessenger.of(context).showSnackBar(
+    SnackBar(content: Text(msg), behavior: SnackBarBehavior.floating),
+  );
+}
+
+
   final List<_FamilyMember> familyMembers = const [
     _FamilyMember('Alp Özdemir', 'Eş', 'AÖ', true),
     _FamilyMember('Ece Özdemir', 'Kız', 'EÖ', true),
     _FamilyMember('Dr. Ahmet Yılmaz', 'Aile hekimi', 'AY', false),
   ];
+
 
   Future<void> _showLanguagePicker() async {
     final selected = await showModalBottomSheet<String>(
@@ -128,39 +166,72 @@ class _ProfileScreenState extends State<ProfileScreen> {
                     Row(
                       children: [
                         Stack(
-                          children: [
-                            const CircleAvatar(
-                              radius: 40,
-                              backgroundColor: Color(0xFFE0EAFF),
-                              child: Text(
-                                'DÖ',
-                                style: TextStyle(
-                                  fontSize: 24,
-                                  fontWeight: FontWeight.w700,
-                                  color: Color(0xFF2563EB),
-                                ),
-                              ),
-                            ),
-                            Positioned(
-                              bottom: 0,
-                              right: 0,
-                              child: Material(
-                                color: Colors.white,
-                                shape: const CircleBorder(),
-                                elevation: 2,
-                                child: IconButton(
-                                  iconSize: 20,
-                                  onPressed: () {
-                                    ScaffoldMessenger.of(context).showSnackBar(
-                                      const SnackBar(content: Text('Profil fotoğrafı yükleme çok yakında.')),
-                                    );
-                                  },
-                                  icon: const Icon(Icons.photo_camera_outlined, size: 18),
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
+  children: [
+    CircleAvatar(
+      radius: 40,
+      backgroundColor: const Color(0xFFE0EAFF),
+      backgroundImage: (_profileImage != null)
+          ? FileImage(File(_profileImage!.path))
+          : null,
+      child: (_profileImage == null)
+          ? const Text(
+              'DÖ',
+              style: TextStyle(
+                fontSize: 24,
+                fontWeight: FontWeight.w700,
+                color: Color(0xFF2563EB),
+              ),
+            )
+          : null,
+    ),
+    Positioned(
+      bottom: 0,
+      right: 0,
+      child: Material(
+        color: Colors.white,
+        shape: const CircleBorder(),
+        elevation: 2,
+        child: IconButton(
+          iconSize: 20,
+          tooltip: 'Profil fotoğrafı',
+          onPressed: () async {
+            // alt menü aç: kamera/galeri
+            final source = await showModalBottomSheet<String>(
+              context: context,
+              builder: (ctx) => SafeArea(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    ListTile(
+                      leading: const Icon(Icons.photo_camera_outlined),
+                      title: const Text('Kameradan çek'),
+                      onTap: () => Navigator.pop(ctx, 'camera'),
+                    ),
+                    ListTile(
+                      leading: const Icon(Icons.photo_library_outlined),
+                      title: const Text('Galeriden seç'),
+                      onTap: () => Navigator.pop(ctx, 'gallery'),
+                    ),
+                    const SizedBox(height: 8),
+                  ],
+                ),
+              ),
+            );
+
+            if (!mounted || source == null) return;
+            if (source == 'camera') {
+              await _pickProfileFromCamera();
+            } else if (source == 'gallery') {
+              await _pickProfileFromGallery();
+            }
+          },
+          icon: const Icon(Icons.photo_camera_outlined, size: 18),
+        ),
+      ),
+    ),
+  ],
+),
+
                         const SizedBox(width: 20),
                         Expanded(
                           child: Column(
